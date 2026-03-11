@@ -70,11 +70,13 @@ jobs:
         run: go vet ./...
 
       # ── Staticcheck (análise estática avançada) ─────────────────────────────
+      # v2025.1 corrige incompatibilidade com golang.org/x/tools >= v0.21 que
+      # causava "invalid array length -delta * delta" no tokeninternal.go.
       - name: "Lint — Go staticcheck"
         uses: dominikh/staticcheck-action@v1
         with:
           working-directory: app
-          version: "2024.1"
+          version: "2025.1"
 
       # ── Lint de manifests Kubernetes ────────────────────────────────────────
       # kubeval removido: binário instável no runner (bug de array negativo).
