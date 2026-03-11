@@ -1,0 +1,347 @@
+name: "CI/CD — Lint → Build → Push → Deploy"
+
+# =============================================================================
+# Triggers
+# =============================================================================
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# =============================================================================
+# Permissões mínimas (princípio do menor privilégio)
+# =============================================================================
+permissions:
+  contents: read
+  packages: write   # necessário para push no GHCR
+  id-token: write   # necessário para OIDC (futuro)
+
+# =============================================================================
+# Variáveis de ambiente globais
+# =============================================================================
+env:
+  IMAGE_NAME: sre-demo-app
+  REGISTRY: ghcr.io
+  K8S_NAMESPACE: sre-demo
+  GO_VERSION: "1.22"
+  KUBECTL_VERSION: "v1.29.0"
+
+# =============================================================================
+# Cancelar runs duplicados (ex.: dois pushes rápidos na mesma branch)
+# =============================================================================
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 1 — LINT
+  # Objetivo: garantir qualidade estática ANTES de qualquer build dispendioso.
+  # ═══════════════════════════════════════════════════════════════════════════
+  lint:
+    name: "🔍 Lint"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      # ── Go setup com cache ──────────────────────────────────────────────────
+      - name: "Setup Go ${{ env.GO_VERSION }}"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: app/go.sum
+
+      # ── Lint Dockerfile com hadolint ────────────────────────────────────────
+      # Falha apenas em erros (warnings são aceitos para não bloquear build)
+      - name: "Lint — Dockerfile (hadolint)"
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      # ── Go vet (detector de bugs) ───────────────────────────────────────────
+      - name: "Lint — Go vet"
+        working-directory: app
+        run: go vet ./...
+
+      # ── Staticcheck (análise estática avançada) ─────────────────────────────
+      - name: "Lint — Go staticcheck"
+        uses: dominikh/staticcheck-action@v1
+        with:
+          working-directory: app
+          version: "2024.1"
+
+      # ── Lint de manifests Kubernetes ────────────────────────────────────────
+      - name: "Lint — Kubernetes manifests (kubeval)"
+        run: |
+          curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz \
+            | tar xz --directory /usr/local/bin
+          kubeval --strict k8s/*.yaml
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 2 — BUILD
+  # Objetivo: compilar o binário Go e validar a imagem Docker localmente.
+  # Roda apenas se lint passou; usa cache de layers para acelerar builds.
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    name: "🔨 Build"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    outputs:
+      # Expõe a tag da imagem para stages seguintes
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_tags: ${{ steps.meta.outputs.tags }}
+      image_labels: ${{ steps.meta.outputs.labels }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Setup Go ${{ env.GO_VERSION }}"
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: app/go.sum
+
+      # ── Testes unitários antes de buildar a imagem ──────────────────────────
+      # Falha rápido: melhor falhar aqui (barato) do que após push (caro)
+      - name: "Test — Go (race detector + coverage)"
+        working-directory: app
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: "Upload coverage artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: app/coverage.out
+          retention-days: 7
+
+      # ── Docker Buildx (multi-platform, cache avançado) ──────────────────────
+      - name: "Setup Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      # ── Metadados da imagem (tags semânticas automáticas) ───────────────────
+      # sha-<commit>  → rastreabilidade
+      # branch-name   → ambientes de desenvolvimento
+      # semver        → releases de produção
+      - name: "Docker — metadata"
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # ── Build local (sem push) para validar a imagem ─────────────────────────
+      # O push ocorre apenas no stage seguinte (separação de responsabilidades)
+      - name: "Docker — build (local validation)"
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Exporta para o daemon local para permitir inspeção
+          load: true
+
+      # ── Smoke test na imagem recém-construída ──────────────────────────────
+      - name: "Docker — container smoke test"
+        run: |
+          docker run --rm -d \
+            --name smoke-test \
+            -p 8080:8080 \
+            -e APP_ENV=ci \
+            $(echo "${{ steps.meta.outputs.tags }}" | head -1)
+
+          echo "Aguardando container inicializar..."
+          sleep 5
+
+          HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Smoke test falhou — HTTP $HTTP_STATUS"
+            docker logs smoke-test
+            docker stop smoke-test
+            exit 1
+          fi
+
+          echo "✅ Smoke test passou — HTTP $HTTP_STATUS"
+          docker stop smoke-test
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 3 — PUSH
+  # Objetivo: publicar a imagem validada no registry.
+  # Roda apenas em push para branches (não em pull_requests de forks).
+  # ═══════════════════════════════════════════════════════════════════════════
+  push:
+    name: "📦 Push"
+    runs-on: ubuntu-latest
+    needs: build
+    # Não faz push em PRs (imagem já validada no build; push = artefato de produção)
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Setup Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      # ── Autenticação no GitHub Container Registry via GITHUB_TOKEN ──────────
+      # GHCR foi escolhido sobre Docker Hub: sem limite de pull, integrado ao repo
+      - name: "Login — GitHub Container Registry"
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Recalcula metadados (mesmo job isolado) ─────────────────────────────
+      - name: "Docker — metadata"
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # ── Build + Push multi-arch (amd64 + arm64) ─────────────────────────────
+      - name: "Docker — build & push"
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # SBOM e provenance para supply chain security
+          sbom: true
+          provenance: true
+
+      # ── Sumário no GitHub Actions UI ──────────────────────────────────────
+      - name: "Summary"
+        run: |
+          echo "## 📦 Image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | \`${{ steps.build-push.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 4 — DEPLOY
+  # Objetivo: aplicar a nova imagem ao cluster Kubernetes.
+  # Roda apenas em push para main (proteção de branches deve ser configurada).
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: "🚀 Deploy"
+    runs-on: ubuntu-latest
+    needs: push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Environment protegido com required reviewers no GitHub Settings
+    environment:
+      name: production
+      url: "https://sre-demo.example.com"
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      # ── kubectl ─────────────────────────────────────────────────────────────
+      - name: "Setup kubectl ${{ env.KUBECTL_VERSION }}"
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      # ── Kubeconfig (base64-encoded no secret KUBECONFIG) ────────────────────
+      - name: "Configure kubeconfig"
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      # ── Garante que o namespace existe (idempotente) ─────────────────────────
+      - name: "Ensure namespace"
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # ── Aplica manifests na ordem correta ───────────────────────────────────
+      # Service antes do Deployment: evita janela onde pods sobem sem endpoint
+      - name: "Apply K8s manifests"
+        run: |
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/hpa.yaml
+          kubectl apply -f k8s/pdb.yaml
+
+      # ── Atualiza a tag da imagem no deployment ───────────────────────────────
+      # Usa o digest SHA para garantir imutabilidade (sem floating tags)
+      - name: "Update image tag"
+        run: |
+          # Recalcula a tag sha- para este commit
+          IMAGE_TAG="sha-$(echo ${{ github.sha }} | cut -c1-7)"
+          FULL_IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
+
+          echo "Atualizando para: ${FULL_IMAGE}"
+          kubectl set image deployment/sre-demo-app \
+            sre-demo-app="${FULL_IMAGE}" \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      # ── Aguarda rollout com timeout ──────────────────────────────────────────
+      - name: "Wait for rollout"
+        run: |
+          kubectl rollout status deployment/sre-demo-app \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=120s
+
+      # ── Verifica pods em estado Running ──────────────────────────────────────
+      - name: "Verify pods"
+        run: |
+          kubectl get pods \
+            -n ${{ env.K8S_NAMESPACE }} \
+            -l app=sre-demo-app \
+            -o wide
+
+      # ── Rollback automático em caso de falha ─────────────────────────────────
+      - name: "Rollback on failure"
+        if: failure()
+        run: |
+          echo "⚠️  Deploy falhou — executando rollback automático..."
+          kubectl rollout undo deployment/sre-demo-app \
+            -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/sre-demo-app \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=60s
+          echo "✅ Rollback concluído"
+
+      # ── Sumário final ────────────────────────────────────────────────────────
+      - name: "Deploy summary"
+        if: success()
+        run: |
+          IMAGE_TAG="sha-$(echo ${{ github.sha }} | cut -c1-7)"
+          echo "## 🚀 Deploy concluído" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ env.K8S_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Autor | \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
