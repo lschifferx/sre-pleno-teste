@@ -5,7 +5,7 @@ name: "CI/CD — Lint → Build → Push → Deploy"
 # =============================================================================
 on:
   push:
-    branches: [main, develop]
+    branches: [main, development]
   pull_request:
     branches: [main]
 
@@ -14,8 +14,8 @@ on:
 # =============================================================================
 permissions:
   contents: read
-  packages: write   # necessário para push no GHCR
-  id-token: write   # necessário para OIDC (futuro)
+  packages: write # necessário para push no GHCR
+  id-token: write # necessário para OIDC (futuro)
 
 # =============================================================================
 # Variáveis de ambiente globais
