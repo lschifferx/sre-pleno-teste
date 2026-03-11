@@ -1,0 +1,15 @@
+---
+# PodDisruptionBudget — garante que ao menos 1 réplica esteja disponível
+# durante evicções voluntárias (node drain, upgrades, etc.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sre-demo-app-pdb
+  namespace: sre-demo
+  labels:
+    app: sre-demo-app
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sre-demo-app

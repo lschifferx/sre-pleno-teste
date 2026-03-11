@@ -1,0 +1,213 @@
+version: "3"
+
+# =============================================================================
+# Variáveis globais
+# =============================================================================
+vars:
+  APP_NAME: sre-demo-app
+  IMAGE: "{{.APP_NAME}}:latest"
+  NAMESPACE: sre-demo
+  REGISTRY: "docker.io"
+
+# =============================================================================
+# Tasks
+# =============================================================================
+tasks:
+
+  # ── Setup do cluster ────────────────────────────────────────────────────────
+  # Pré-requisito: executar scripts/setup-env.sh antes desta task.
+
+  setup:
+    desc: "Bootstrap: minikube + namespaces + repositórios Helm"
+    cmds:
+      - minikube start --cpus=4 --memory=6144 --driver=docker
+      - minikube addons enable metrics-server
+      - kubectl create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl create namespace monitoring     --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl create namespace logging        --dry-run=client -o yaml | kubectl apply -f -
+      - helm repo add elastic              https://helm.elastic.co                             2>/dev/null || true
+      - helm repo add grafana              https://grafana.github.io/helm-charts              2>/dev/null || true
+      - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+      - helm repo update
+
+  # ── Build ───────────────────────────────────────────────────────────────────
+
+  lint:
+    desc: "Lint do Dockerfile com hadolint"
+    cmds:
+      - docker run --rm -i hadolint/hadolint < Dockerfile
+
+  build:
+    desc: "Build da imagem Docker dentro do daemon do minikube"
+    cmds:
+      - eval $(minikube docker-env) && docker build -t {{.IMAGE}} .
+
+  # ── Deploy da aplicação ─────────────────────────────────────────────────────
+
+  deploy:
+    desc: "Aplica todos os manifests K8s e aguarda o rollout"
+    cmds:
+      - kubectl create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl apply -f k8s/service.yaml
+      - kubectl apply -f k8s/deployment.yaml
+      - kubectl apply -f k8s/hpa.yaml
+      - kubectl apply -f k8s/pdb.yaml
+      - kubectl rollout status deployment/{{.APP_NAME}} -n {{.NAMESPACE}} --timeout=90s
+
+  rollback:
+    desc: "Desfaz o último deployment"
+    cmds:
+      - kubectl rollout undo deployment/{{.APP_NAME}} -n {{.NAMESPACE}}
+
+  # ── Stack de observabilidade ────────────────────────────────────────────────
+
+  install-prometheus:
+    desc: "Instala kube-prometheus-stack (Prometheus + Grafana) via Helm"
+    cmds:
+      - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+      - helm repo add grafana              https://grafana.github.io/helm-charts              2>/dev/null || true
+      - helm repo update
+      - |
+        helm upgrade --install kube-prometheus-stack \
+          prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --set grafana.enabled=true \
+          --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+          --wait
+
+  install-elasticsearch:
+    desc: "Instala Elasticsearch single-node via Helm (otimizado para minikube)"
+    cmds:
+      - helm repo add elastic https://helm.elastic.co 2>/dev/null || true
+      - helm repo update
+      - |
+        helm upgrade --install elasticsearch elastic/elasticsearch \
+          --namespace logging \
+          --set replicas=1 \
+          --set minimumMasterNodes=1 \
+          --set xpack.security.enabled=false \
+          --set resources.requests.cpu=200m \
+          --set resources.requests.memory=512Mi \
+          --set resources.limits.cpu=1 \
+          --set resources.limits.memory=1Gi \
+          --set clusterHealthCheckParams="wait_for_status=yellow&timeout=120s" \
+          --timeout 10m \
+          --wait
+      - bash scripts/wait-for-es.sh logging
+
+  install-kibana:
+    desc: "Instala Kibana via Helm (idempotente, com tratamento de hooks órfãos)"
+    cmds:
+      - bash scripts/install-kibana.sh
+
+  install-filebeat:
+    desc: "Aplica o DaemonSet do Filebeat"
+    cmds:
+      - kubectl apply -f elk/filebeat.yaml
+
+  install-elk:
+    desc: "Instala a stack ELK completa (Elasticsearch → Kibana → Filebeat)"
+    cmds:
+      - task: install-elasticsearch
+      - task: install-kibana
+      - task: install-filebeat
+
+  # ── Importação de dashboards ────────────────────────────────────────────────
+
+  import-kibana-dashboard:
+    desc: "Importa o dashboard e o alert rule do Kibana via Saved Objects API"
+    cmds:
+      - |
+        KIBANA_URL="http://localhost:5601"
+        echo ">>> Importando saved objects no Kibana..."
+        curl -sf -X POST "${KIBANA_URL}/api/saved_objects/_import?overwrite=true" \
+          -H "kbn-xsrf: true" \
+          -F "file=@elk/kibana-dashboard.json" \
+          | python3 -m json.tool
+        echo "✅ Dashboard e alert rule importados."
+
+  import-grafana-dashboard:
+    desc: "Copia o dashboard Grafana para o pod e exibe instruções de import"
+    cmds:
+      - |
+        GRAFANA_POD=$(kubectl get pods -n monitoring \
+          -l app.kubernetes.io/name=grafana \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl cp monitoring/grafana-dashboard.json \
+          "monitoring/${GRAFANA_POD}:/tmp/grafana-dashboard.json"
+        echo "✅ Dashboard copiado para o pod ${GRAFANA_POD}."
+        echo "   Acesse Grafana → Dashboards → Import → Upload JSON e selecione o arquivo."
+
+  # ── Port-forward helpers ────────────────────────────────────────────────────
+
+  port-forward-app:
+    desc: "Port-forward da aplicação (localhost:8080)"
+    cmds:
+      - kubectl port-forward svc/{{.APP_NAME}} 8080:80 -n {{.NAMESPACE}}
+
+  port-forward-grafana:
+    desc: "Port-forward do Grafana (localhost:3000)"
+    cmds:
+      - kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
+
+  port-forward-kibana:
+    desc: "Port-forward do Kibana (localhost:5601)"
+    cmds:
+      - kubectl port-forward svc/kibana-kibana 5601:5601 -n logging
+
+  port-forward-prometheus:
+    desc: "Port-forward do Prometheus (localhost:9090)"
+    cmds:
+      - kubectl port-forward svc/kube-prometheus-stack-prometheus 9090:9090 -n monitoring
+
+  # ── Validação e carga ───────────────────────────────────────────────────────
+
+  validate:
+    desc: "Smoke test em todos os endpoints da aplicação"
+    cmds:
+      - |
+        APP_URL=$(minikube service {{.APP_NAME}} -n {{.NAMESPACE}} --url 2>/dev/null \
+          || echo "http://localhost:8080")
+        echo "Testing ${APP_URL}"
+        curl -sf "${APP_URL}/health"         | python3 -m json.tool
+        curl -sf "${APP_URL}/ready"          | python3 -m json.tool
+        curl -sf "${APP_URL}/metrics"        | head -20
+        curl -sf "${APP_URL}/api/v1/ping"    | python3 -m json.tool
+        curl -sf "${APP_URL}/api/v1/status"  | python3 -m json.tool
+
+  stress:
+    desc: "Gera carga para exercitar dashboards (200 × 3 endpoints = 600 requests)"
+    cmds:
+      - |
+        APP_URL=$(minikube service {{.APP_NAME}} -n {{.NAMESPACE}} --url 2>/dev/null \
+          || echo "http://localhost:8080")
+        echo ">>> Enviando 600 requisições para ${APP_URL}..."
+        for i in $(seq 1 200); do
+          curl -s "${APP_URL}/api/v1/ping"             > /dev/null
+          curl -s "${APP_URL}/api/v1/simulate/error"   > /dev/null
+          curl -s "${APP_URL}/api/v1/simulate/latency" > /dev/null
+        done
+        echo "✅ 600 requisições enviadas."
+
+  # ── Teardown ────────────────────────────────────────────────────────────────
+
+  clean:
+    desc: "Remove os manifests da aplicação do cluster"
+    cmds:
+      - kubectl delete -f k8s/ --ignore-not-found
+
+  destroy:
+    desc: "Destrói o cluster minikube por completo"
+    cmds:
+      - minikube delete
+
+  # ── All-in-one ──────────────────────────────────────────────────────────────
+
+  all:
+    desc: "Setup completo: minikube + stacks de observabilidade + aplicação"
+    cmds:
+      - task: setup
+      - task: build
+      - task: deploy
+      - task: install-prometheus
+      - task: install-elk
