@@ -40,7 +40,7 @@ jobs:
   # Objetivo: garantir qualidade estática ANTES de qualquer build dispendioso.
   # ═══════════════════════════════════════════════════════════════════════════
   lint:
-    name: "🔍 Lint"
+    name: "Lint"
     runs-on: ubuntu-latest
 
     steps:
@@ -96,7 +96,7 @@ jobs:
   # Roda apenas se lint passou; usa cache de layers para acelerar builds.
   # ═══════════════════════════════════════════════════════════════════════════
   build:
-    name: "🔨 Build"
+    name: "Build"
     runs-on: ubuntu-latest
     needs: lint
 
@@ -178,13 +178,13 @@ jobs:
 
           HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "❌ Smoke test falhou — HTTP $HTTP_STATUS"
+            echo "Smoke test falhou — HTTP $HTTP_STATUS"
             docker logs smoke-test
             docker stop smoke-test
             exit 1
           fi
 
-          echo "✅ Smoke test passou — HTTP $HTTP_STATUS"
+          echo "Smoke test passou — HTTP $HTTP_STATUS"
           docker stop smoke-test
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -193,7 +193,7 @@ jobs:
   # Roda apenas em push para branches (não em pull_requests de forks).
   # ═══════════════════════════════════════════════════════════════════════════
   push:
-    name: "📦 Push"
+    name: "Push"
     runs-on: ubuntu-latest
     needs: build
     # Não faz push em PRs (imagem já validada no build; push = artefato de produção)
@@ -247,7 +247,7 @@ jobs:
       # ── Sumário no GitHub Actions UI ──────────────────────────────────────
       - name: "Summary"
         run: |
-          echo "## 📦 Image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "## Image pushed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -260,7 +260,7 @@ jobs:
   # Roda apenas em push para main (proteção de branches deve ser configurada).
   # ═══════════════════════════════════════════════════════════════════════════
   deploy:
-    name: "🚀 Deploy"
+    name: "Deploy"
     runs-on: ubuntu-latest
     needs: push
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -333,20 +333,20 @@ jobs:
       - name: "Rollback on failure"
         if: failure()
         run: |
-          echo "⚠️  Deploy falhou — executando rollback automático..."
+          echo "Deploy falhou — executando rollback automático..."
           kubectl rollout undo deployment/sre-demo-app \
             -n ${{ env.K8S_NAMESPACE }}
           kubectl rollout status deployment/sre-demo-app \
             -n ${{ env.K8S_NAMESPACE }} \
             --timeout=60s
-          echo "✅ Rollback concluído"
+          echo "Rollback concluído"
 
       # ── Sumário final ────────────────────────────────────────────────────────
       - name: "Deploy summary"
         if: success()
         run: |
           IMAGE_TAG="sha-$(echo ${{ github.sha }} | cut -c1-7)"
-          echo "## 🚀 Deploy concluído" >> $GITHUB_STEP_SUMMARY
+          echo "## Deploy concluído" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
