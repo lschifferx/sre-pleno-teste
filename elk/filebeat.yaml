@@ -28,8 +28,17 @@ data:
               - contains:
                   kubernetes.namespace: logging
 
-    output.logstash:
-      hosts: ["logstash-logstash:5044"]
+    output.elasticsearch:
+      hosts: ["https://elasticsearch-master:9200"]
+      username: "elastic"
+      password: "${ELASTICSEARCH_PASSWORD}"
+      ssl.verification_mode: "none"
+      ssl.enabled: true
+      index: "app-logs-%{+yyyy.MM.dd}"
+
+    setup.template.name: "app-logs"
+    setup.template.pattern: "app-logs-*"
+    setup.ilm.enabled: false
 
     logging.level: warning
     logging.to_files: false
@@ -64,9 +73,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: elasticsearch-master-credentials
+                  key: password
 
           securityContext:
-            runAsUser: 0       # must read /var/log
+            runAsUser: 0 # must read /var/log
             privileged: false
 
           resources:
