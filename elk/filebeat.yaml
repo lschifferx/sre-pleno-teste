@@ -20,21 +20,55 @@ data:
                     logs_path: /var/log/containers/
 
     processors:
+      # Parse structured log lines emitted by the Go middleware:
+      # timestamp=<ISO8601> level=<LEVEL> endpoint=<PATH> method=<METHOD> status=<CODE> latency=<N>ms size=<N>
+      - dissect:
+          tokenizer: "timestamp=%{log.timestamp} level=%{log.level} endpoint=%{url.path} method=%{http.request.method} status=%{http.response.status_code} latency=%{event.duration}ms size=%{http.response.body.bytes}"
+          field: "message"
+          target_prefix: ""
+          ignore_failure: true
+      - convert:
+          fields:
+            - {from: "http.response.status_code", type: integer}
+            - {from: "event.duration", type: float}
+            - {from: "http.response.body.bytes", type: integer}
+          ignore_missing: true
+          fail_on_error: false
+      - add_tags:
+          tags: ["error"]
+          when:
+            equals:
+              log.level: "ERROR"
+      - add_tags:
+          tags: ["warning"]
+          when:
+            equals:
+              log.level: "WARN"
       - drop_event:
           when:
             or:
+              - equals:
+                  url.path: "/health"
+              - equals:
+                  url.path: "/ready"
+              - equals:
+                  url.path: "/metrics"
               - contains:
                   kubernetes.namespace: kube-system
               - contains:
                   kubernetes.namespace: logging
 
     output.elasticsearch:
-      hosts: ["https://elasticsearch-master:9200"]
+      # FQDN completo para resolução DNS confiável dentro do cluster.
+      # O chart oficial do Elastic habilita TLS por padrão (xpack.security=true),
+      # por isso usamos https:// e credenciais do Secret gerado automaticamente.
+      # ssl.verification_mode: none aceita o certificado auto-assinado do chart.
+      hosts: ["https://elasticsearch-master.logging.svc.cluster.local:9200"]
       username: "elastic"
       password: "${ELASTICSEARCH_PASSWORD}"
       ssl.verification_mode: "none"
       ssl.enabled: true
-      index: "app-logs-%{+yyyy.MM.dd}"
+      index: "app-logs-%{[kubernetes.namespace]}-%{+yyyy.MM.dd}"
 
     setup.template.name: "app-logs"
     setup.template.pattern: "app-logs-*"

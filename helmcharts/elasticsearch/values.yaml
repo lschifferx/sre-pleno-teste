@@ -1,0 +1,96 @@
+# =============================================================================
+# helmcharts/elasticsearch/values.yaml
+#
+# Configuração do Elasticsearch para ambiente local (single-node).
+# Otimizado para rodar dentro do minikube com recursos limitados.
+# =============================================================================
+
+elasticsearch:
+  enabled: true
+
+  # Single-node para ambiente de desenvolvimento/teste
+  replicas: 1
+  minimumMasterNodes: 1
+
+  # ---------------------------------------------------------------------------
+  # Security — mantido habilitado (padrão do chart oficial Elastic).
+  #
+  # Com security=true o chart:
+  #   1. Habilita TLS no endpoint :9200 (HTTPS)
+  #   2. Gera automaticamente o Secret "elasticsearch-master-credentials"
+  #      com username=elastic e password aleatória
+  #
+  # O Filebeat referencia esse Secret via secretKeyRef para autenticar,
+  # e usa ssl.verification_mode: "none" para aceitar o certificado
+  # auto-assinado gerado pelo chart.
+  #
+  # NÃO desabilitar: sem security o chart ainda pode gerar o Secret mas
+  # o ES não exige autenticação, tornando ssl.enabled=true no Filebeat
+  # inválido (TLS handshake contra servidor sem TLS = connection refused).
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # Recursos — heap 512m requer limit >= 1.5Gi para acomodar overhead JVM
+  # ---------------------------------------------------------------------------
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "768Mi"
+    limits:
+      cpu: "2000m"
+      memory: "1536Mi"
+
+  # Heap JVM = metade do limit do container (768m de 1536Mi)
+  esJavaOpts: "-Xmx768m -Xms768m"
+
+  # ---------------------------------------------------------------------------
+  # Persistência
+  # ---------------------------------------------------------------------------
+  volumeClaimTemplate:
+    accessModes: ["ReadWriteOnce"]
+    resources:
+      requests:
+        storage: 5Gi
+
+  # ---------------------------------------------------------------------------
+  # Health check relaxado para ambiente local (nodes demoram para subir)
+  # ---------------------------------------------------------------------------
+  clusterHealthCheckParams: "wait_for_status=yellow&timeout=120s"
+
+  # Aumenta timeout do readiness probe — ES sob GC pode demorar > 5s para responder
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 5
+    successThreshold: 3
+
+  # ---------------------------------------------------------------------------
+  # Configuração extra do elasticsearch.yml
+  # ---------------------------------------------------------------------------
+  esConfig:
+    elasticsearch.yml: |
+      cluster.name: sre-demo-cluster
+      action.auto_create_index: "app-logs-*,+.*,-*"
+      # Suprime warning de discovery em modo single-node (sem master role)
+      discovery.seed_hosts: []
+
+  # Roles padrão do chart — inclui "master" para que o chart injete corretamente
+  # cluster.initial_master_nodes e o node seja master-eligible.
+  # NÃO usar discovery.type=single-node: o ES 8.5.1 não permite cluster.initial_master_nodes
+  # junto com discovery.type=single-node. O chart já configura single-node corretamente
+  # via replicas=1 e minimumMasterNodes=1.
+  roles:
+    - master
+    - data
+    - ingest
+    - remote_cluster_client
+
+  extraEnvs: []
+
+  # ---------------------------------------------------------------------------
+  # Service
+  # ---------------------------------------------------------------------------
+  service:
+    type: ClusterIP
+    port: 9200

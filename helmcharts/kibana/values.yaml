@@ -1,0 +1,61 @@
+# =============================================================================
+# helmcharts/kibana/values.yaml
+#
+# Valores para o Kibana. Conecta ao Elasticsearch sem TLS (xpack disabled),
+# compatível com a configuração do chart elasticsearch/ deste projeto.
+# =============================================================================
+
+kibana:
+  enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Conexão com Elasticsearch
+  # Com xpack.security habilitado no ES, a conexão deve ser HTTPS.
+  # Usar hostname curto (sem .cluster.local) pois o certificado auto-assinado
+  # gerado pelo chart do ES tem SANs apenas até .svc (não .svc.cluster.local).
+  # ---------------------------------------------------------------------------
+  elasticsearchHosts: "https://elasticsearch-master.logging.svc:9200"
+
+  # Aceita o certificado auto-assinado gerado pelo chart do ES
+  extraEnvs:
+    - name: ELASTICSEARCH_SSL_VERIFICATIONMODE
+      value: "none"
+
+  # ---------------------------------------------------------------------------
+  # Recursos
+  # ---------------------------------------------------------------------------
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  # ---------------------------------------------------------------------------
+  # kibana.yml extra
+  # ---------------------------------------------------------------------------
+  kibanaConfig:
+    kibana.yml: |
+      server.name: kibana
+      server.host: "0.0.0.0"
+      elasticsearch.hosts: ["https://elasticsearch-master.logging.svc:9200"]
+      elasticsearch.ssl.verificationMode: none
+      # Desabilita telemetria
+      telemetry.optIn: false
+
+  # ---------------------------------------------------------------------------
+  # Service
+  # ---------------------------------------------------------------------------
+  service:
+    type: ClusterIP
+    port: 5601
+
+  # ---------------------------------------------------------------------------
+  # Health checks ajustados — Kibana demora para conectar ao ES
+  # ---------------------------------------------------------------------------
+  readinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 20

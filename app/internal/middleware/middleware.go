@@ -58,7 +58,7 @@ func Logging(next http.Handler) http.Handler {
 			level = "INFO"
 		}
 
-		// Structured log — compatible with Logstash grok pattern
+		// Structured log — key=value format parsed by Filebeat dissect processor
 		log.Printf("timestamp=%s level=%s endpoint=%s method=%s status=%d latency=%dms size=%d",
 			time.Now().UTC().Format(time.RFC3339),
 			level,

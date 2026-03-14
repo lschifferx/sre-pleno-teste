@@ -1,0 +1,38 @@
+---
+# =============================================================================
+# ServiceMonitor — garante que o Prometheus descobre e raspa a sre-demo-app
+#
+# O Prometheus Operator (parte do kube-prometheus-stack) monitora recursos do
+# tipo ServiceMonitor no cluster. Ao criar este objeto, o Operator gera
+# automaticamente o job de scraping correspondente na configuração do Prometheus,
+# sem precisar reiniciá-lo manualmente.
+#
+# Pré-requisito no Deployment da aplicação:
+#   - O Service da sre-demo-app deve ter o label "app: sre-demo-app"
+#   - A porta HTTP deve se chamar "http" (spec.ports[].name: http)
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sre-demo-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sre-demo-app
+    release: prometheus-stack   # deve coincidir com o release do kube-prometheus-stack
+spec:
+  # Seleciona Services no namespace sre-demo
+  namespaceSelector:
+    matchNames:
+      - sre-demo
+
+  # Seleciona o Service com label app=sre-demo-app
+  selector:
+    matchLabels:
+      app: sre-demo-app
+
+  endpoints:
+    - port: http          # nome da porta no Service (spec.ports[].name)
+      path: /metrics
+      interval: 15s       # frequência de scraping
+      scrapeTimeout: 10s
+      honorLabels: true

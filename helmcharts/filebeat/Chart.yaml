@@ -1,0 +1,16 @@
+apiVersion: v2
+name: filebeat
+description: >
+  Wrapper chart para o Filebeat (Elastic oficial) configurado como DaemonSet
+  para coletar logs de todos os pods do cluster e enviá-los ao Elasticsearch.
+  Inclui RBAC, ConfigMap de configuração e o DaemonSet com montagem correta
+  dos volumes de log do host.
+type: application
+version: 1.0.0
+appVersion: "8.13.0"
+
+dependencies:
+  - name: filebeat
+    version: "8.5.1"
+    repository: https://helm.elastic.co
+    condition: filebeat.enabled
