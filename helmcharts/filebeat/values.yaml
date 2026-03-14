@@ -1,0 +1,198 @@
+# =============================================================================
+# helmcharts/filebeat/values.yaml
+#
+# Valores para o Filebeat rodando como DaemonSet.
+#
+# CORREÇÃO CRÍTICA em relação ao elk/filebeat.yaml original:
+#   O Elasticsearch está instalado sem xpack.security (sem TLS).
+#   O arquivo original usava "https://" + ssl.enabled=true, causando
+#   falha de SSL handshake e impedindo o envio de logs.
+#   Aqui usamos "http://" e ssl.enabled=false.
+# =============================================================================
+
+filebeat:
+  enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Configuração principal do Filebeat (filebeat.yml)
+  # ---------------------------------------------------------------------------
+  filebeatConfig:
+    filebeat.yml: |
+      # ── Coleta de logs de containers ────────────────────────────────────────
+      filebeat.inputs:
+        - type: container
+          paths:
+            - /var/log/containers/*.log
+          multiline.pattern: '^[[:space:]]'
+          multiline.negate: false
+          multiline.match: after
+          processors:
+            - add_kubernetes_metadata:
+                host: ${NODE_NAME}
+                matchers:
+                  - logs_path:
+                      logs_path: "/var/log/containers/"
+
+      # ── Filtros globais ──────────────────────────────────────────────────────
+      processors:
+        # Parse structured log lines emitted by the Go middleware:
+        # timestamp=<ISO8601> level=<LEVEL> endpoint=<PATH> method=<METHOD> status=<CODE> latency=<N>ms size=<N>
+        - dissect:
+            tokenizer: "timestamp=%{log.timestamp} level=%{log.level} endpoint=%{url.path} method=%{http.request.method} status=%{http.response.status_code} latency=%{event.duration}ms size=%{http.response.body.bytes}"
+            field: "message"
+            target_prefix: ""
+            ignore_failure: true
+        - convert:
+            fields:
+              - {from: "http.response.status_code", type: integer}
+              - {from: "event.duration", type: float}
+              - {from: "http.response.body.bytes", type: integer}
+            ignore_missing: true
+            fail_on_error: false
+        - add_tags:
+            tags: ["error"]
+            when:
+              equals:
+                log.level: "ERROR"
+        - add_tags:
+            tags: ["warning"]
+            when:
+              equals:
+                log.level: "WARN"
+        - drop_event:
+            when:
+              or:
+                - equals:
+                    url.path: "/health"
+                - equals:
+                    url.path: "/ready"
+                - equals:
+                    url.path: "/metrics"
+        - drop_fields:
+            fields: ["agent.ephemeral_id", "agent.hostname", "ecs"]
+            ignore_missing: true
+        - drop_event:
+            when:
+              or:
+                - not:
+                    has_fields: ["kubernetes.namespace"]
+                - equals:
+                    kubernetes.namespace: "kube-system"
+                - equals:
+                    kubernetes.namespace: "logging"
+                - equals:
+                    kubernetes.namespace: "monitoring"
+
+      # ── Output: Elasticsearch ────────────────────────────────────────────────
+      # O chart oficial do Elastic habilita xpack.security por padrão, expondo
+      # o endpoint em HTTPS com certificado auto-assinado.
+      # - ssl.verification_mode: none → aceita o cert auto-assinado do chart
+      # - username/password          → lidos do Secret gerado pelo chart do ES
+      # - FQDN completo              → garante resolução DNS em qualquer namespace
+      output.elasticsearch:
+        hosts:
+          - "https://elasticsearch-master.logging.svc:9200"
+        username: "elastic"
+        password: "${ELASTICSEARCH_PASSWORD}"
+        ssl.verification_mode: "none"
+        ssl.enabled: true
+        index: "app-logs-%{[kubernetes.namespace]}-%{+yyyy.MM.dd}"
+        bulk_max_size: 512
+        worker: 2
+
+      # ── Template e ILM ───────────────────────────────────────────────────────
+      setup.ilm.enabled: false
+      setup.template.name: "app-logs"
+      setup.template.pattern: "app-logs-*"
+      setup.template.settings:
+        index.number_of_shards: 1
+        index.number_of_replicas: 0
+
+      logging.level: info
+      logging.to_files: false
+      logging.metrics.enabled: false
+
+      # Habilita endpoint HTTP de monitoramento (necessário para liveness/readiness probes)
+      http.enabled: true
+      http.port: 5066
+
+  # ---------------------------------------------------------------------------
+  # Variáveis de ambiente injetadas no container
+  # NODE_NAME já é injetado pelo chart por padrão
+  # ---------------------------------------------------------------------------
+  extraEnvs:
+    # Senha lida do Secret gerado automaticamente pelo chart do Elasticsearch
+    - name: ELASTICSEARCH_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: elasticsearch-master-credentials
+          key: password
+
+  # ---------------------------------------------------------------------------
+  # Recursos
+  # ---------------------------------------------------------------------------
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+  # ---------------------------------------------------------------------------
+  # Security context — Filebeat precisa de root para ler /var/log
+  # ---------------------------------------------------------------------------
+  podSecurityContext:
+    runAsUser: 0
+
+  # ---------------------------------------------------------------------------
+  # Tolerations — garante que o DaemonSet rode em TODOS os nós,
+  # incluindo nós com taints (ex.: control-plane do minikube)
+  # ---------------------------------------------------------------------------
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+
+  # ---------------------------------------------------------------------------
+  # Montagem de volumes extras (varlog e varlibdockercontainers já são
+  # montados pelo chart por padrão — não duplicar aqui)
+  # ---------------------------------------------------------------------------
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  # ---------------------------------------------------------------------------
+  # RBAC — permissões para leitura de metadados Kubernetes
+  # ---------------------------------------------------------------------------
+  serviceAccount: "filebeat"
+
+  rbac:
+    create: true
+
+  # ---------------------------------------------------------------------------
+  # Health checks — usa o endpoint HTTP de monitoramento do Filebeat (:5066)
+  # ---------------------------------------------------------------------------
+  livenessProbe:
+    exec:
+      command:
+        - sh
+        - -c
+        - curl -sf http://localhost:5066/ > /dev/null
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    exec:
+      command:
+        - sh
+        - -c
+        - curl -sf http://localhost:5066/ > /dev/null
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3

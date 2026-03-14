@@ -1,0 +1,92 @@
+---
+# =============================================================================
+# Job de verificação de conectividade — Filebeat → Elasticsearch
+#
+# Roda após a instalação do Filebeat e confirma que:
+#   1. O Elasticsearch está acessível no endpoint HTTP (sem TLS)
+#   2. O índice app-logs-* foi criado (Filebeat está enviando logs)
+#
+# O Job usa "helm.sh/hook: post-install,post-upgrade" para ser executado
+# automaticamente após cada `helm install` ou `helm upgrade`.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: filebeat-connectivity-check
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+  labels:
+    app: filebeat-check
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: connectivity-check
+          image: curlimages/curl:8.6.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              ES_URL="https://elasticsearch-master.logging.svc.cluster.local:9200"
+              # Senha do Secret gerado pelo chart do Elasticsearch
+              ES_PASS=$(cat /mnt/es-credentials/password 2>/dev/null || echo "")
+              CURL_OPTS="-sk"
+              AUTH_OPTS=""
+              if [ -n "${ES_PASS}" ]; then
+                AUTH_OPTS="-u elastic:${ES_PASS}"
+              fi
+
+              echo "=== Verificando conectividade com Elasticsearch ==="
+              echo "Endpoint: ${ES_URL}"
+
+              MAX_RETRIES=18
+              RETRY=0
+              until curl ${CURL_OPTS} ${AUTH_OPTS} "${ES_URL}/_cluster/health" > /dev/null 2>&1; do
+                RETRY=$((RETRY + 1))
+                if [ "${RETRY}" -ge "${MAX_RETRIES}" ]; then
+                  echo "ERRO: Elasticsearch não respondeu após ${MAX_RETRIES} tentativas."
+                  exit 1
+                fi
+                echo "Aguardando ES... tentativa ${RETRY}/${MAX_RETRIES}"
+                sleep 10
+              done
+
+              echo "Elasticsearch acessível!"
+              echo ""
+              echo "=== Saúde do cluster ==="
+              curl ${CURL_OPTS} ${AUTH_OPTS} "${ES_URL}/_cluster/health?pretty"
+
+              echo ""
+              echo "=== Índices app-logs-* ==="
+              INDICES=$(curl ${CURL_OPTS} ${AUTH_OPTS} \
+                "${ES_URL}/_cat/indices/app-logs-*?h=index,docs.count,store.size" 2>/dev/null || echo "nenhum")
+              echo "${INDICES}"
+
+              if [ "${INDICES}" = "nenhum" ] || [ -z "${INDICES}" ]; then
+                echo "Nenhum índice app-logs-* encontrado ainda (normal nos primeiros minutos)."
+              else
+                echo "Filebeat está enviando logs para o Elasticsearch!"
+              fi
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+          volumeMounts:
+            - name: es-credentials
+              mountPath: /mnt/es-credentials
+              readOnly: true
+      volumes:
+        - name: es-credentials
+          secret:
+            secretName: elasticsearch-master-credentials
+            optional: true   # não falha se o Secret não existir

@@ -1,0 +1,168 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-sre-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  sre-demo-dashboard.json: |
+    {
+      "title": "SRE Demo App — Golden Signals",
+      "uid": "sre-demo-app",
+      "schemaVersion": 36,
+      "version": 1,
+      "refresh": "15s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": { "list": [] },
+      "annotations": { "list": [] },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Availability (5m)",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 95 },
+                { "color": "green", "value": 99 }
+              ]}
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [{
+            "expr": "100 * (1 - (sum(rate(http_requests_total{status=~\"5..\"}[5m])) or vector(0)) / (sum(rate(http_requests_total[5m])) or vector(1)))",
+            "legendFormat": "Availability %",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Request Rate (rps)",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [{
+            "expr": "sum(rate(http_requests_total[5m]))",
+            "legendFormat": "req/s",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "P99 Latency",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "P99",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Error Rate",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 5 }
+              ]}
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+          "targets": [{
+            "expr": "100 * sum(rate(http_requests_total{status=~\"5..\"}[5m])) / (sum(rate(http_requests_total[5m])) or vector(1))",
+            "legendFormat": "Error %",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Request Rate por Endpoint",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum(rate(http_requests_total[5m])) by (endpoint)",
+            "legendFormat": "{{ `{{ endpoint }}` }}",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Latência P50 / P95 / P99",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "P99",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Memory Allocation (bytes)",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{
+            "expr": "app_memory_alloc_bytes",
+            "legendFormat": "Heap Alloc",
+            "refId": "A"
+          }]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Goroutines (proxy CPU)",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "targets": [{
+            "expr": "app_cpu_goroutines",
+            "legendFormat": "Goroutines",
+            "refId": "A"
+          }]
+        }
+      ]
+    }

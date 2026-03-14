@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kibana
+description: >
+  Wrapper chart para o Kibana (Elastic oficial) conectado ao Elasticsearch
+  do namespace logging. Substitui o script install-kibana.sh com tratamento
+  idempotente de hooks via valores Helm nativos.
+type: application
+version: 1.0.0
+appVersion: "8.13.0"
+
+dependencies:
+  - name: kibana
+    version: "8.5.1"
+    repository: https://helm.elastic.co
+    condition: kibana.enabled

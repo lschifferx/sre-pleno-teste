@@ -1,0 +1,155 @@
+# =============================================================================
+# helmcharts/prometheus/values.yaml
+#
+# Valores para o wrapper chart "prometheus-stack".
+# A chave raiz "kube-prometheus-stack" é repassada diretamente para o
+# sub-chart upstream, seguindo a convenção de alias de dependência Helm.
+# =============================================================================
+
+kube-prometheus-stack:
+  enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Prometheus
+  # ---------------------------------------------------------------------------
+  prometheus:
+    enabled: true
+
+    prometheusSpec:
+      # ── Coleta por annotations de pod ──────────────────────────────────────
+      # Com "nil" nos seletores abaixo, o Prometheus descobre ServiceMonitors e
+      # PodMonitors de QUALQUER namespace — garante scraping da sre-demo-app
+      # mesmo que ela esteja no namespace "sre-demo" e não em "monitoring".
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+
+      # Permite que o Prometheus faça scraping de pods com as annotations:
+      #   prometheus.io/scrape: "true"
+      #   prometheus.io/port: "8080"
+      #   prometheus.io/path: "/metrics"
+      additionalScrapeConfigs:
+        - job_name: "sre-demo-app-pods"
+          honor_labels: true
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            # Só raspa pods com annotation scrape=true
+            - source_labels:
+                [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+              action: keep
+              regex: "true"
+            # Usa o path definido na annotation (default: /metrics)
+            - source_labels:
+                [__meta_kubernetes_pod_annotation_prometheus_io_path]
+              action: replace
+              target_label: __metrics_path__
+              regex: (.+)
+            # Usa a porta definida na annotation
+            - source_labels:
+                - __address__
+                - __meta_kubernetes_pod_annotation_prometheus_io_port
+              action: replace
+              regex: ([^:]+)(?::\d+)?;(\d+)
+              replacement: $1:$2
+              target_label: __address__
+            # Labels de contexto Kubernetes
+            - action: labelmap
+              regex: __meta_kubernetes_pod_label_(.+)
+            - source_labels: [__meta_kubernetes_namespace]
+              action: replace
+              target_label: kubernetes_namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              action: replace
+              target_label: kubernetes_pod_name
+
+      # Retenção e recursos ajustados para ambiente local (minikube)
+      retention: 15d
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+
+      # Storage persistente para não perder dados ao reiniciar
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 5Gi
+
+  # ---------------------------------------------------------------------------
+  # Grafana
+  # ---------------------------------------------------------------------------
+  grafana:
+    enabled: true
+
+    adminUser: admin
+    adminPassword: "sre-admin-2024"
+
+    # Sidecar habilitado para carregar dashboards automaticamente via ConfigMap
+    # com label grafana_dashboard: "1"
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        folder: /var/lib/grafana/dashboards
+        searchNamespace: ALL
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 300m
+        memory: 512Mi
+
+    service:
+      type: ClusterIP
+      port: 80
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager
+  # ---------------------------------------------------------------------------
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+  # ---------------------------------------------------------------------------
+  # Exporters padrão
+  # ---------------------------------------------------------------------------
+  nodeExporter:
+    enabled: true
+
+  kubeStateMetrics:
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Componentes desnecessários em ambiente local
+  # ---------------------------------------------------------------------------
+  kubeEtcd:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
