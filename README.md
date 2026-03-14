@@ -127,7 +127,6 @@ sre-pleno-teste/
 │   └── grafana-dashboard.json  # Dashboard Golden Signals (Latency/Traffic/Errors/Saturation)
 └── elk/
     ├── filebeat.yaml           # DaemonSet de referência (substituído pelo Helm)
-    ├── logstash.conf           # Grok parse + enrich + output ES
     └── kibana-dashboard.json   # Dashboard + Alert rule (≥20 erros/5min)
 ```
 
@@ -234,14 +233,14 @@ Dashboards e alertas sem carga real são teatro. Precisávamos de endpoints que 
 ### ADR-006 — Logs estruturados em JSON para stdout
 
 **Contexto:**  
-Filebeat lê stdout dos containers. Logs em texto livre exigem regex frágil no Logstash; logs JSON são parseados diretamente com o codec `json`.
+Filebeat lê stdout dos containers e envia direto ao Elasticsearch. Logs em texto livre exigem parsing frágil na ingestão; logs JSON são indexados diretamente sem transformação.
 
 **Decisão:**  
 Middleware de logging emite JSON com campos fixos: `timestamp`, `method`, `path`, `status`, `latency_ms`, `environment`. Campo `log_level` derivado do status HTTP: `2xx=INFO`, `4xx=WARN`, `5xx=ERROR`.
 
 **Consequências:**
 
-- Logstash usa codec `json`, sem Grok. Mais simples e mais performático.
+- Filebeat indexa os logs diretamente no Elasticsearch sem camada de transformação intermediária.
 - Campos consistentes permitem filtros e dashboards Kibana sem transformações adicionais.
 - `environment` no log permite distinguir staging de produção na mesma pilha de logs.
 
@@ -736,7 +735,7 @@ Instalados sequencialmente por `task install-elk` (que chama `install-elasticsea
 - Rollback com um comando: `helm rollback <release> <revision>`.
 - `values.yaml` por componente documenta todas as customizações em formato declarativo.
 - `helm dependency update` antes de cada install garante dependências atualizadas.
-- Arquivos em `elk/` (filebeat.yaml, logstash.conf, kibana-dashboard.json) mantidos como referência e documentação, mas não mais usados diretamente no deploy.
+- Arquivos em `elk/` (filebeat.yaml, kibana-dashboard.json) mantidos como referência histórica — o deploy não os utiliza diretamente.
 
 ---
 
