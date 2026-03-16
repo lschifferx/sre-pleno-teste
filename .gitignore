@@ -1,0 +1,6 @@
+# Helm
+helmcharts/**/charts/*.tgz
+helmcharts/**/Chart.lock
+
+# macOS
+**/.DS_Store
