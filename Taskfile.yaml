@@ -111,19 +111,18 @@ tasks:
       - |
         echo "=== Targets do Prometheus ==="
         kubectl port-forward svc/prometheus-stack-kube-prom-prometheus \
-          9090:9090 -n {{.MONITORING_NS}} &
+          9090:9090 -n {{.MONITORING_NS}} >/dev/null 2>&1 &
         PF_PID=$!
         sleep 3
-        curl -sf http://localhost:9090/api/v1/targets \
-          | python3 -c "
+        curl -sf "http://localhost:9090/api/v1/targets?state=active" | python3 -c "
         import json, sys
         data = json.load(sys.stdin)
         targets = data['data']['activeTargets']
         sre = [t for t in targets if 'sre-demo' in str(t.get('labels', {}))]
-        print(f'Total targets ativos: {len(targets)}')
-        print(f'Targets sre-demo-app: {len(sre)}')
+        print('Total targets ativos: ' + str(len(targets)))
+        print('Targets sre-demo-app: ' + str(len(sre)))
         for t in sre:
-            print(f\"  job={t['labels'].get('job')} state={t['health']} url={t['scrapeUrl']}\")
+            print('  job=' + t['labels'].get('job','') + ' state=' + t['health'] + ' url=' + t['scrapeUrl'])
         if not sre:
             print('AVISO: sre-demo-app nao encontrado nos targets. Verifique o ServiceMonitor.')
         "
@@ -135,7 +134,7 @@ tasks:
       - |
         echo "=== Logs do pod Filebeat ==="
         FILEBEAT_POD=$(kubectl get pods -n {{.LOGGING_NS}} \
-          -l app=filebeat -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          -l app=filebeat-filebeat -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
         if [ -z "${FILEBEAT_POD}" ]; then
           echo "ERRO: Nenhum pod Filebeat encontrado no namespace {{.LOGGING_NS}}"
           exit 1
@@ -147,7 +146,7 @@ tasks:
         ES_PASS=$(kubectl get secret elasticsearch-master-credentials \
           -n {{.LOGGING_NS}} -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || echo "")
         kubectl port-forward svc/elasticsearch-master \
-          9200:9200 -n {{.LOGGING_NS}} &
+          9200:9200 -n {{.LOGGING_NS}} >/dev/null 2>&1 &
         PF_PID=$!
         sleep 3
         curl -sk -u "elastic:${ES_PASS}" \
@@ -188,27 +187,33 @@ tasks:
     desc: "Smoke test em todos os endpoints da aplicação"
     cmds:
       - |
-        APP_URL=$(minikube service {{.APP_NAME}} -n {{.NAMESPACE}} --url 2>/dev/null \
-          || echo "http://localhost:8080")
+        kubectl port-forward svc/{{.APP_NAME}} 18080:80 -n {{.NAMESPACE}} >/dev/null 2>&1 &
+        PF_PID=$!
+        sleep 2
+        APP_URL="http://localhost:18080"
         echo "Testing ${APP_URL}"
         curl -sf "${APP_URL}/health"         | python3 -m json.tool
         curl -sf "${APP_URL}/ready"          | python3 -m json.tool
         curl -sf "${APP_URL}/metrics"        | head -20
         curl -sf "${APP_URL}/api/v1/ping"    | python3 -m json.tool
         curl -sf "${APP_URL}/api/v1/status"  | python3 -m json.tool
+        kill $PF_PID 2>/dev/null || true
 
   stress:
     desc: "Gera carga para exercitar dashboards (600 requests)"
     cmds:
       - |
-        APP_URL=$(minikube service {{.APP_NAME}} -n {{.NAMESPACE}} --url 2>/dev/null \
-          || echo "http://localhost:8080")
+        kubectl port-forward svc/{{.APP_NAME}} 18080:80 -n {{.NAMESPACE}} >/dev/null 2>&1 &
+        PF_PID=$!
+        sleep 2
+        APP_URL="http://localhost:18080"
         echo ">>> Enviando 600 requisições para ${APP_URL}..."
         for i in $(seq 1 200); do
           curl -s "${APP_URL}/api/v1/ping"             > /dev/null
           curl -s "${APP_URL}/api/v1/simulate/error"   > /dev/null
           curl -s "${APP_URL}/api/v1/simulate/latency" > /dev/null
         done
+        kill $PF_PID 2>/dev/null || true
         echo "Concluido."
 
   # ── Teardown ────────────────────────────────────────────────────────────────
