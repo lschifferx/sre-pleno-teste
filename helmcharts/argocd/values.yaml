@@ -1,0 +1,109 @@
+# =============================================================================
+# helmcharts/argocd/values.yaml
+#
+# Valores para o wrapper chart "argocd".
+# A chave raiz "argo-cd" é repassada diretamente para o sub-chart upstream,
+# seguindo a convenção de alias de dependência Helm.
+# =============================================================================
+
+argo-cd:
+  enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Global
+  # ---------------------------------------------------------------------------
+  global:
+    domain: argocd.local
+
+  # ---------------------------------------------------------------------------
+  # Server
+  # ---------------------------------------------------------------------------
+  server:
+    # Expõe a UI sem TLS — adequado para ambiente local (minikube)
+    extraArgs:
+      - --insecure
+
+    service:
+      type: ClusterIP
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+  # ---------------------------------------------------------------------------
+  # Application Controller
+  # ---------------------------------------------------------------------------
+  controller:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # ---------------------------------------------------------------------------
+  # Repo Server
+  # ---------------------------------------------------------------------------
+  repoServer:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # ---------------------------------------------------------------------------
+  # ApplicationSet Controller
+  # ---------------------------------------------------------------------------
+  applicationSet:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # ---------------------------------------------------------------------------
+  # Notifications Controller
+  # ---------------------------------------------------------------------------
+  notifications:
+    enabled: false
+
+  # ---------------------------------------------------------------------------
+  # Dex (SSO) — desabilitado em ambiente local
+  # ---------------------------------------------------------------------------
+  dex:
+    enabled: false
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # ---------------------------------------------------------------------------
+  redis:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # ---------------------------------------------------------------------------
+  # Configs
+  # ---------------------------------------------------------------------------
+  configs:
+    params:
+      # Desabilita TLS no server (alinhado com --insecure acima)
+      server.insecure: true
+
+    # Credenciais iniciais da UI — alterar em produção via Secret
+    secret:
+      argocdServerAdminPassword: "$2a$10$QZK4h8Ai.AYjkd3OJxN.6eLKrcS84bm5vCzTc5z0NhjQbjRLy7DnC"
+      # Senha em texto: sre-admin-2024 (mesmo padrão do Grafana)

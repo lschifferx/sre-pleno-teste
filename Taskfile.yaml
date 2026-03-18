@@ -19,6 +19,7 @@ tasks:
       - kubectl create namespace {{.LOGGING_NS}}    --dry-run=client -o yaml | kubectl apply -f -
       - helm repo add elastic              https://helm.elastic.co
       - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      - helm repo add argo                 https://argoproj.github.io/argo-helm
       - helm repo update
 
   lint:
@@ -103,6 +104,20 @@ tasks:
       - task: install-kibana
       - task: install-filebeat
 
+  install-argocd:
+    desc: "Instala Argo CD via helmcharts/argocd e registra a Application sre-demo-app"
+    cmds:
+      - kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+      - helm dependency update helmcharts/argocd
+      - |
+        helm upgrade --install argocd \
+          helmcharts/argocd \
+          --namespace argocd \
+          --values helmcharts/argocd/values.yaml \
+          --timeout 10m \
+          --wait
+      - kubectl apply -f k8s/argocd-app.yaml
+
   # ── Verificações de saúde ───────────────────────────────────────────────────
 
   check-prometheus:
@@ -181,6 +196,11 @@ tasks:
     cmds:
       - kubectl port-forward svc/elasticsearch-master 9200:9200 -n {{.LOGGING_NS}}
 
+  port-forward-argocd:
+    desc: "Port-forward do Argo CD (localhost:8888) — admin / sre-admin-2024"
+    cmds:
+      - kubectl port-forward svc/argocd-server 8888:80 -n argocd
+
   # ── Carga e validação ───────────────────────────────────────────────────────
 
   validate:
@@ -231,10 +251,11 @@ tasks:
   # ── All-in-one ──────────────────────────────────────────────────────────────
 
   all:
-    desc: "Setup completo 100% Helm: minikube + Prometheus + ELK + aplicação"
+    desc: "Setup completo 100% Helm: minikube + Prometheus + ELK + ArgoCD + aplicação"
     cmds:
       - task: setup
       - task: build
       - task: deploy
       - task: install-prometheus
       - task: install-elk
+      - task: install-argocd

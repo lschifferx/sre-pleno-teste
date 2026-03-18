@@ -1,0 +1,15 @@
+apiVersion: v2
+name: argocd
+description: >
+  Wrapper chart que instala o Argo CD com configuração ajustada para
+  gerenciar o deploy contínuo da aplicação sre-demo-app a partir do
+  repositório Git, complementando o pipeline GitHub Actions existente.
+type: application
+version: 1.0.0
+appVersion: "v2.11.0"
+
+dependencies:
+  - name: argo-cd
+    version: "7.3.11"
+    repository: https://argoproj.github.io/argo-helm
+    condition: argo-cd.enabled
