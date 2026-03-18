@@ -9,7 +9,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/lschifferx/sre-pleno-teste.git
-    targetRevision: main
+    targetRevision: development
     path: k8s
   destination:
     server: https://kubernetes.default.svc

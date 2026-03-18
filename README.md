@@ -1,6 +1,6 @@
 # sre-pleno-teste
 
-> Ecossistema de **Reliability Engineering** em Go + Kubernetes + ELK + Grafana.  
+> Ecossistema de **Reliability Engineering** em Go + Kubernetes + ELK + Grafana + ArgoCD.  
 > Cada decisão técnica está documentada. Nada foi feito por acidente.
 
 ---
@@ -46,6 +46,7 @@
    - [ADR-028 — Filebeat como DaemonSet (não Sidecar)](#adr-028--filebeat-como-daemonset-não-sidecar)
    - [ADR-029 — Stack ELK gerenciada 100% via Helm](#adr-029--stack-elk-gerenciada-100-via-helm)
    - [ADR-030 — Taskfile como orquestrador local](#adr-030--taskfile-como-orquestrador-local)
+   - [ADR-031 — ArgoCD como operador de GitOps](#adr-031--argocd-como-operador-de-gitops)
 10. [Quick Start](#quick-start)
 11. [Referência de Endpoints](#referência-de-endpoints)
 12. [Referência de Métricas](#referência-de-métricas)
@@ -71,10 +72,17 @@
 │  │    Filebeat       │──beats──►│ Elasticsearch → Kibana           │  │
 │  │   (DaemonSet)     │          │                                  │  │
 │  └───────────────────┘          └──────────────────────────────────┘  │
+│                                                                      │
+│  namespace: argocd                                                   │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  ArgoCD — GitOps operator                                    │   │
+│  │  Observa: github.com/…/sre-pleno-teste (branch main, k8s/)  │   │
+│  │  Sincroniza automaticamente → namespace sre-demo             │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-A aplicação expõe métricas Prometheus em `/metrics` e emite logs JSON para stdout. O Prometheus faz scrape por anotações no pod. O Filebeat coleta os logs do nó e os encaminha ao Elasticsearch. Kibana e Grafana cobrem, respectivamente, a visão de logs e a visão de métricas.
+A aplicação expõe métricas Prometheus em `/metrics` e emite logs JSON para stdout. O Prometheus faz scrape por anotações no pod. O Filebeat coleta os logs do nó e os encaminha ao Elasticsearch. Kibana e Grafana cobrem, respectivamente, a visão de logs e a visão de métricas. O ArgoCD monitora o repositório Git e sincroniza automaticamente qualquer mudança nos manifests de `k8s/` com o cluster.
 
 ---
 
@@ -90,6 +98,7 @@ A aplicação expõe métricas Prometheus em `/metrics` e emite logs JSON para s
 | Métricas        | Prometheus + Grafana              | Golden Signals em tempo real               |
 | Logs            | Filebeat + Elasticsearch + Kibana | Busca e alertas sobre logs                 |
 | CI/CD           | GitHub Actions + GHCR             | Build, push, deploy automatizados          |
+| GitOps          | ArgoCD                            | Sincronização contínua Git → cluster       |
 | Automação local | Taskfile                          | Um comando para tudo                       |
 
 ---
@@ -117,12 +126,14 @@ sre-pleno-teste/
 │   ├── deployment.yaml         # 2 réplicas, 3 probes, ConfigMap, securityContext completo
 │   ├── service.yaml            # ClusterIP (porta 80 → 8080)
 │   ├── hpa.yaml                # HPA v2: CPU >70% / Mem >75%, 2–6 réplicas
-│   └── pdb.yaml                # PodDisruptionBudget: minAvailable=1
+│   ├── pdb.yaml                # PodDisruptionBudget: minAvailable=1
+│   └── argocd-app.yaml         # Application ArgoCD: aponta para k8s/ no branch main
 ├── helmcharts/
 │   ├── prometheus/             # Wrapper chart: kube-prometheus-stack
 │   ├── elasticsearch/          # Wrapper chart: elastic/elasticsearch
 │   ├── kibana/                 # Wrapper chart: elastic/kibana
-│   └── filebeat/               # Wrapper chart: elastic/filebeat
+│   ├── filebeat/               # Wrapper chart: elastic/filebeat
+│   └── argocd/                 # Wrapper chart: argo-cd (argoproj/argo-helm)
 ├── monitoring/
 │   └── grafana-dashboard.json  # Dashboard Golden Signals (Latency/Traffic/Errors/Saturation)
 └── elk/
@@ -757,6 +768,38 @@ Instalados sequencialmente por `task install-elk` (que chama `install-elasticsea
 
 ---
 
+### ADR-031 — ArgoCD como operador de GitOps
+
+**Contexto:**  
+O pipeline GitHub Actions faz o deploy via `kubectl apply` direto do runner de CI. Isso cria um acoplamento entre o estado do cluster e a execução do pipeline: se o runner falha, o cluster fica desatualizado sem nenhum mecanismo de reconciliação contínua. Além disso, não há visibilidade centralizada do estado real dos recursos no cluster em relação ao que está no repositório.
+
+**Decisão:**  
+ArgoCD instalado no namespace `argocd` via wrapper chart `helmcharts/argocd/` (upstream: `argoproj/argo-helm v7.3.11`). Uma `Application` (`k8s/argocd-app.yaml`) aponta para o diretório `k8s/` no branch `main` do repositório, com `syncPolicy.automated` habilitado.
+
+```yaml
+syncPolicy:
+  automated:
+    prune: true      # remove recursos deletados do Git
+    selfHeal: true   # reverte mudanças manuais no cluster
+```
+
+**Consequências:**
+
+- **Reconciliação contínua:** qualquer drift entre o cluster e o Git é corrigido automaticamente, sem intervenção humana.
+- **`selfHeal: true`:** mudanças manuais via `kubectl apply` fora do Git são revertidas — o repositório é a única fonte de verdade.
+- **`prune: true`:** recursos removidos do Git são deletados do cluster automaticamente, evitando acúmulo de recursos órfãos.
+- **Visibilidade:** a UI do ArgoCD exibe o estado de sincronização de cada recurso em tempo real (`Synced`, `OutOfSync`, `Degraded`).
+- **Complementa o CI:** o GitHub Actions continua responsável por build, testes e push da imagem. O ArgoCD assume a responsabilidade de garantir que o cluster reflita o estado do Git — separação clara de responsabilidades.
+- **Credenciais:** repositório público não requer credenciais adicionais. Para repositórios privados, configurar em **Settings → Repositories** na UI do ArgoCD.
+- **Acesso local:** `task port-forward-argocd` expõe a UI em `http://localhost:8888` (admin / sre-admin-2024).
+
+**Alternativas descartadas:**
+
+- **Flux:** igualmente válido, mas ArgoCD tem UI nativa que facilita a visualização do estado de sincronização — relevante para demonstração e troubleshooting.
+- **Apenas GitHub Actions:** sem reconciliação contínua; drift manual no cluster não é detectado nem corrigido.
+
+---
+
 ## Quick Start
 
 ### Pré-requisitos
@@ -792,6 +835,7 @@ task build               # imagem Docker buildada dentro do daemon minikube
 task deploy              # aplica manifests K8s e aguarda rollout
 task install-prometheus  # Prometheus + Grafana via Helm
 task install-elk         # Elasticsearch → Kibana → Filebeat via Helm
+task install-argocd      # ArgoCD via Helm + registra Application sre-demo-app
 ```
 
 > **Nota:** Para `topologySpreadConstraints` com `DoNotSchedule` funcionar localmente, use:
@@ -808,6 +852,7 @@ task port-forward-grafana    # http://localhost:3000  (admin / sre-admin-2024)
 task port-forward-kibana     # http://localhost:5601
 task port-forward-prometheus # http://localhost:9090
 task port-forward-elasticsearch # https://localhost:9200
+task port-forward-argocd     # http://localhost:8888  (admin / sre-admin-2024)
 ```
 
 ### Gerando carga e validando
